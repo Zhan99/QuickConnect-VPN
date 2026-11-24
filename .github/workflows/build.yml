@@ -1,98 +1,57 @@
-name: Build QuickConnect VPN APK
-
+name: Build SR Global VPN
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
-
-env:
-  GRADLE_OPTS: "-Djava.net.preferIPv4Stack=true -Dorg.gradle.jvmargs=-Xmx2048m"
-
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: 1. Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: 2. Locate & Validate Android Source ZIP
-        id: find_zip
-        run: |
-          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | sort | head -n 1)
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No Android Source ZIP file found in repository root!"
-            exit 1
-          fi
-          echo "Found ZIP: $ZIP_FILE"
-          unzip -t "$ZIP_FILE"
-          echo "zip_path=$ZIP_FILE" >> $GITHUB_OUTPUT
-
-      - name: 3. Extract Android Source Safely
-        run: |
-          rm -rf extracted_project
-          mkdir -p extracted_project
-          unzip -q "${{ steps.find_zip.outputs.zip_path }}" -d extracted_project
-
-      - name: 4. Detect Android Project Root
-        id: project_root
-        run: |
-          SETTINGS_FILE=$(find extracted_project -maxdepth 3 \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts not found inside extracted ZIP!"
-            exit 1
-          fi
-          ROOT_DIR=$(dirname "$SETTINGS_FILE")
-          echo "Detected Project Root: $ROOT_DIR"
-          echo "root_dir=$ROOT_DIR" >> $GITHUB_OUTPUT
-
-      - name: 5. Setup Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-
-      - name: 6. Setup Android SDK & Accept Licenses
-        uses: android-actions/setup-android@v4
-        with:
-          cmdline-tools-version: '13114758'
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-
-      - name: 7. Setup Compatible Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
-      - name: 8. Validate Gradle Project & Run Android Lint
-        working-directory: ${{ steps.project_root.outputs.root_dir }}
+      - uses: android-actions/setup-android@v3
+      - name: Retrieve upstream Android client
+        env:
+          UPSTREAM_REF: ${{ vars.OPENGATE_REF || 'master' }}
         run: |
-          gradle tasks --no-daemon
-          gradle lintDebug --no-daemon --refresh-dependencies
-
-      - name: 9. Build Debug APK
-        working-directory: ${{ steps.project_root.outputs.root_dir }}
+          git init engine-project
+          git -C engine-project remote add origin https://github.com/IyedAmiri/OpenGateVPN.git
+          git -C engine-project fetch --depth=1 origin "$UPSTREAM_REF"
+          git -C engine-project checkout --detach FETCH_HEAD
+          git -C engine-project submodule update --init --recursive
+          git -C engine-project rev-parse HEAD | tee upstream-commit.txt
+      - name: Apply branded sources
         run: |
-          gradle assembleDebug --no-daemon
-
-      - name: 10. Collect Outputs & Reports
-        if: always()
+          python3 scripts/prepare.py engine-project
+          chmod +x engine-project/gradlew
+          test -f engine-project/gradle/wrapper/gradle-wrapper.jar
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-37' 'platform-tools'
+      - name: Compile APK
+        working-directory: engine-project
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify APK
         run: |
-          mkdir -p build_outputs/apk build_outputs/reports
-          find "${{ steps.project_root.outputs.root_dir }}" -name "*.apk" -exec cp {} build_outputs/apk/ \; || true
-          find "${{ steps.project_root.outputs.root_dir }}" -path "*/reports/*" -exec cp -r {} build_outputs/reports/ \; || true
-
-      - name: 11. Upload APK Artifact
-        if: success()
-        uses: actions/upload-artifact@v4
+          mkdir -p output
+          APK=$(find engine-project/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
+          test -n "$APK"
+          cp "$APK" output/SR_Global_VPN.apk
+          cp upstream-commit.txt output/
+          TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$TOOLS/apksigner" verify --verbose output/SR_Global_VPN.apk
+          "$TOOLS/aapt" dump badging output/SR_Global_VPN.apk | tee output/apk-info.txt
+          grep -q "package: name='com.srcreationfarm.globalvpn'" output/apk-info.txt
+          unzip -l output/SR_Global_VPN.apk | grep -E 'lib/(arm64-v8a|armeabi-v7a)/.*openvpn'
+      - name: Package assembled source
+        run: tar --exclude=.git --exclude=.gradle --exclude=build --exclude=local.properties -czf output/SR_Global_VPN_source.tar.gz -C engine-project .
+      - uses: actions/upload-artifact@v4
         with:
-          name: QuickConnect-VPN-Debug-APK
-          path: build_outputs/apk/*.apk
+          name: SR_Global_VPN
+          path: output/
           if-no-files-found: error
-
-      - name: 12. Upload Lint & Build Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Android-Lint-Build-Reports
-          path: build_outputs/reports/
-          if-no-files-found: warn
