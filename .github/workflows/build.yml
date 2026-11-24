@@ -1,0 +1,95 @@
+name: Build QuickConnect VPN APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Locate & Validate Android Source ZIP
+        id: find_zip
+        run: |
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | sort | head -n 1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No Android Source ZIP file found in repository root!"
+            exit 1
+          fi
+          echo "Found ZIP: $ZIP_FILE"
+          unzip -t "$ZIP_FILE"
+          echo "zip_path=$ZIP_FILE" >> $GITHUB_OUTPUT
+
+      - name: 3. Extract Android Source Safely
+        run: |
+          rm -rf extracted_project
+          mkdir -p extracted_project
+          unzip -q "${{ steps.find_zip.outputs.zip_path }}" -d extracted_project
+
+      - name: 4. Detect Android Project Root
+        id: project_root
+        run: |
+          SETTINGS_FILE=$(find extracted_project -maxdepth 3 \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle or settings.gradle.kts not found inside extracted ZIP!"
+            exit 1
+          fi
+          ROOT_DIR=$(dirname "$SETTINGS_FILE")
+          echo "Detected Project Root: $ROOT_DIR"
+          echo "root_dir=$ROOT_DIR" >> $GITHUB_OUTPUT
+
+      - name: 5. Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 6. Setup Android SDK & Accept Licenses
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '13114758'
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: 7. Setup Compatible Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: 8. Validate Gradle Project & Run Android Lint
+        working-directory: ${{ steps.project_root.outputs.root_dir }}
+        run: |
+          gradle tasks --no-daemon
+          gradle lintDebug --no-daemon
+
+      - name: 9. Build Debug APK
+        working-directory: ${{ steps.project_root.outputs.root_dir }}
+        run: |
+          gradle assembleDebug --no-daemon
+
+      - name: 10. Collect Outputs & Reports
+        if: always()
+        run: |
+          mkdir -p build_outputs/apk build_outputs/reports
+          find "${{ steps.project_root.outputs.root_dir }}" -name "*.apk" -exec cp {} build_outputs/apk/ \; || true
+          find "${{ steps.project_root.outputs.root_dir }}" -path "*/reports/*" -exec cp -r {} build_outputs/reports/ \; || true
+
+      - name: 11. Upload APK Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickConnect-VPN-Debug-APK
+          path: build_outputs/apk/*.apk
+          if-no-files-found: error
+
+      - name: 12. Upload Lint & Build Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-Lint-Build-Reports
+          path: build_outputs/reports/
+          if-no-files-found: warn
