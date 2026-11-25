@@ -9,13 +9,30 @@ jobs:
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Validate build kit
+        run: python3 scripts/check_kit.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Setup Android SDK (no deprecated tools package)
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-34 platforms;android-37 build-tools;36.0.0'
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Verify SDK installation
+        run: |
+          sdkmanager --version
+          test -f "$ANDROID_HOME/platforms/android-34/android.jar"
+          test -f "$ANDROID_HOME/platforms/android-37/android.jar"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt"
       - name: Retrieve upstream Android client
         env:
           UPSTREAM_REF: ${{ vars.OPENGATE_REF || 'master' }}
@@ -30,26 +47,29 @@ jobs:
         run: |
           python3 scripts/prepare.py engine-project
           chmod +x engine-project/gradlew
-          test -f engine-project/gradle/wrapper/gradle-wrapper.jar
-      - name: Install SDK
-        run: sdkmanager 'platforms;android-37' 'platform-tools'
+          test -s engine-project/gradle/wrapper/gradle-wrapper.jar
+      - name: Check Gradle version
+        working-directory: engine-project
+        run: ./gradlew --version
       - name: Compile APK
         working-directory: engine-project
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
       - name: Verify APK
         run: |
           mkdir -p output
-          APK=$(find engine-project/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)
-          test -n "$APK"
+          APK=engine-project/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
           cp "$APK" output/SR_Global_VPN.apk
           cp upstream-commit.txt output/
-          TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          TOOLS="$ANDROID_HOME/build-tools/36.0.0"
           "$TOOLS/apksigner" verify --verbose output/SR_Global_VPN.apk
           "$TOOLS/aapt" dump badging output/SR_Global_VPN.apk | tee output/apk-info.txt
           grep -q "package: name='com.srcreationfarm.globalvpn'" output/apk-info.txt
-          unzip -l output/SR_Global_VPN.apk | grep -E 'lib/(arm64-v8a|armeabi-v7a)/.*openvpn'
+          python3 scripts/check_apk.py output/SR_Global_VPN.apk
       - name: Package assembled source
-        run: tar --exclude=.git --exclude=.gradle --exclude=build --exclude=local.properties -czf output/SR_Global_VPN_source.tar.gz -C engine-project .
+        run: |
+          tar --exclude=.git --exclude=.gradle --exclude=build --exclude=local.properties -czf output/SR_Global_VPN_source.tar.gz -C engine-project .
+          tar -tzf output/SR_Global_VPN_source.tar.gz > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: SR_Global_VPN
